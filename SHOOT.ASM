@@ -12,14 +12,27 @@ format PE GUI 4.0
 include 'win32a.inc'
 
 IDT_TIMER1=1
+IDT_TIMER2=2
+MIN_X = 10
 MAX_X = 500
+MIN_Y = 15  ;for enemy
+MAX_Y = 100 ;for enemy
 BULLET_START_Y = 185
 GUN_Y = 200
 GUN_START_X = 170
+MAX_ENEMY = 5
+MAX_RAND_NUM = 1024 ;no less than (MAX_ENEMY * 2) + 1, must be even number
 
 section '.text' code readable executable
 
   entry $
+
+        invoke  CryptAcquireContext,context,0,0,1,0xF0000000
+        test    eax,eax
+        jz      .done
+        invoke  CryptGenRandom,[context],MAX_RAND_NUM,buffer
+        invoke  CryptReleaseContext,[context],0
+  .done:
 
         invoke  GetModuleHandle,0
         mov     [wc.hInstance],eax
@@ -63,6 +76,9 @@ proc WindowProc hwnd,wmsg,wparam,lparam
         invoke  SetTimer,[hwnd],IDT_TIMER1,200,NULL
         or      eax,eax
         jz      .wmcreate.error
+        invoke  SetTimer,[hwnd],IDT_TIMER2,1000,NULL
+        or      eax,eax
+        jz      .wmcreate.error
         xor     eax,eax
         jmp     .finish
   .wmcreate.error:
@@ -76,12 +92,36 @@ proc WindowProc hwnd,wmsg,wparam,lparam
         ;mov     [hdc],eax
         invoke  TextOut, [hdc], 0, 0, _inst, _len_inst
         invoke  TextOut, [hdc], [_x], [_y], _gun, 1
+
+        ;draw the enemies for the first time (x & y based on random number)
+.draw_enemy:
+        cmp     [_draw_enemy], 1
+        jne     .wmpaint.finish
+        mov     ecx, [_rand_id]
+        mov     dl, byte [buffer + ecx]
+        shr     dl, 2   ;y, make it less than 255 (to fit the upper section of window)
+        add     dl, 15  ;avoid _inst line at first row
+        mov     ebx, [_enemy_id]
+        mov     [_enemy_y + ebx * 4], edx
+        mov     dl, byte [buffer + ecx + 1]
+        mov     [_enemy_x + ebx * 4], edx
+        add     [_enemy_x + ebx * 4], edx
+        add     [_rand_id], 2
+        invoke  TextOut, [hdc], [_enemy_x + ebx * 4], [_enemy_y + ebx * 4], _enemy, 1
+        add     [_enemy_id], 1
+        cmp     [_enemy_id], MAX_ENEMY
+        je      .wmpaint.finish
+        jmp     .draw_enemy
+
+.wmpaint.finish:
+        and     [_draw_enemy], 0
+        mov     [_enemy_id], 0
         invoke  EndPaint,[hwnd],ps
         xor     eax,eax
         jmp     .finish
   .wmtimer:
         cmp     [wparam],IDT_TIMER1
-        jne     .processed
+        jne     .wmtimer.next
         cmp     [_shooting], 1
         jne     .processed
         invoke   TextOut, [hdc], [_bullet_x], [_bullet_y], _space, 1
@@ -91,11 +131,89 @@ proc WindowProc hwnd,wmsg,wparam,lparam
         and     [_shooting], 0
         mov     [_bullet_y], BULLET_START_Y
         jmp     .draw_finish
+
+.wmtimer.next:
+        cmp     [wparam],IDT_TIMER2
+        jne     .processed
+
+.draw_enemy_timer:
+        mov     ebx, [_enemy_id]
+        invoke  TextOut, [hdc], [_enemy_x + ebx * 4], [_enemy_y + ebx * 4], _space, 2
+        ;invoke  Beep,700,300
+        ;jmp     .draw_finish
+
+.draw_enemy_y:
+        xor     eax, eax
+        add     [_rand_id], 1
+        cmp     [_rand_id], MAX_RAND_NUM
+        jl      .start_y
+        mov     [_rand_id],0
+        ;cmovge   ecx, eax  ;reset _rand_id
+        ;cmovnge  ecx, [_rand_id]
+.start_y:
+        mov     ecx, [_rand_id]
+        mov     dl, byte [buffer + ecx]
+        bt      edx, 01000_0000b
+        ;cmovc   eax, [_up]
+        jc      .continue_y_up
+        bt      edx, 00111_1110b
+        jc      .continue_y_down
+        jmp     .continue_y
+.continue_y_up:
+        sub     [_enemy_y + ebx * 4], 15
+        jmp     .continue_y
+.continue_y_down:
+        add     [_enemy_y + ebx * 4], 30
+.continue_y:
+        ;add     [_enemy_y + ebx * 4], eax
+        cmp     [_enemy_y + ebx * 4], MIN_Y
+        jle     .continue_y_down
+        cmp     [_enemy_y + ebx * 4], MAX_Y
+        jge     .continue_y_up
+        mov     [_rand_id], ecx
+
+.draw_enemy_x:
+        xor     eax, eax
+        add     [_rand_id], 1
+        cmp     [_rand_id], MAX_RAND_NUM
+        jl      .start_x
+        mov     [_rand_id],0
+        ;cmovge   ecx, eax  ;reset _rand_id
+        ;cmovnge  ecx, [_rand_id]
+.start_x:
+        mov     ecx, [_rand_id]
+        mov     dl, byte [buffer + ecx]
+        bt      edx, 01000_0000b
+        ;cmovc   eax, [_up]
+        jc      .continue_x_left
+        bt      edx, 00111_1110b
+        jc      .continue_x_right
+        jmp     .continue_x
+.continue_x_left:
+        sub     [_enemy_x + ebx * 4], 10
+        jmp     .continue_x
+.continue_x_right:
+        add     [_enemy_x + ebx * 4], 20
+.continue_x:
+        ;add     [_enemy_y + ebx * 4], eax
+        cmp     [_enemy_x + ebx * 4], MIN_X
+        jle     .continue_x_right
+        cmp     [_enemy_x + ebx * 4], MAX_X
+        jge     .continue_x_left
+        mov     [_rand_id], ecx
+
+        invoke  TextOut, [hdc], [_enemy_x + ebx * 4], [_enemy_y + ebx * 4], _enemy, 1
+        add     [_enemy_id], 1
+        cmp     [_enemy_id], MAX_ENEMY
+        je      .draw_finish
+        jmp     .draw_enemy_timer
+
 .draw_bullet:
         invoke   TextOut, [hdc], [_bullet_x], [_bullet_y], _bullet, 1
         ;invoke  Beep, 750, 300
         ;invoke  MessageBeep, MB_OK
 .draw_finish:
+        mov      [_enemy_id], 0
         xor      eax,eax
         jmp     .finish
   .wmkeydown:
@@ -114,7 +232,7 @@ proc WindowProc hwnd,wmsg,wparam,lparam
         mov     edx, [_x]
         mov     [_bullet_x], edx
         or      [_shooting], 1
-        invoke  Beep, 7000, 20
+        ;invoke  Beep, 7000, 20
         jmp     .wmpaint
 .left:
         cmp     [_x],10
@@ -147,9 +265,10 @@ section '.data' data readable writeable
 
   _title db 'shoot',0
   _class db 'shoot',0
-  _space db ' '
+  _space db '  '
   _bullet db '|'
   _gun db '^'
+  _enemy db '='
   _inst db 'Press Left or Right arrow key to move; Spacebar to shoot; Esc to quit'
   _len_inst = $ - _inst
 
@@ -158,6 +277,24 @@ section '.data' data readable writeable
   _bullet_x dd 170
   _bullet_y dd BULLET_START_Y
   _shooting dd 0
+
+  _enemy_x rd MAX_ENEMY
+  _enemy_y rd MAX_ENEMY
+  _enemy_visible rd MAX_ENEMY
+  _enemy_id dd 0
+  _rand_id dd 0
+  _draw_enemy dd 1
+
+  _up dd -15
+  _down dd 30
+  _right dd 10
+  _left dd -10
+  _no_move dd 0
+
+  buffer  rb MAX_RAND_NUM
+          db 0
+  context dd ?
+
   msg MSG
   ps PAINTSTRUCT
   rc RECT
@@ -168,7 +305,8 @@ section '.idata' import data readable writeable
 
   library kernel,'KERNEL32.DLL',\
           user,'USER32.DLL',\
-          gdi,'GDI32.DLL'
+          gdi,'GDI32.DLL',\
+          advapi,'ADVAPI32.DLL'
 
   import kernel,\
          GetModuleHandle,'GetModuleHandleA',\
@@ -195,3 +333,8 @@ section '.idata' import data readable writeable
 
   import gdi,\
          TextOut, 'TextOutA'
+
+  import advapi,\
+          CryptAcquireContext, 'CryptAcquireContextA',\
+          CryptGenRandom, 'CryptGenRandom',\
+          CryptReleaseContext, 'CryptReleaseContext'
